@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-use std::str::FromStr;
 use anyhow::{anyhow, Result};
 use compile_commands::{CompilationDatabase, SourceFile};
 use log::{info, warn};
@@ -17,6 +15,8 @@ use lsp_types::{
     DidOpenTextDocumentParams, DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionParams,
     HoverParams, PublishDiagnosticsParams, ReferenceParams, SignatureHelpParams, Uri,
 };
+use std::path::PathBuf;
+use std::str::FromStr;
 use tree_sitter::Parser;
 
 use crate::{
@@ -31,26 +31,57 @@ pub enum UriConversion {
     Unchecked(PathBuf),
 }
 
+/// Sanitizes the URI path sent by an LSP client
+///
+/// - "%3A" is replaced by ':' on windows, as this is likely escaped
+///   by the emacs client on windows/mingw/msys2
+/// - Returning `UriConversion::Canonicalized` indicates a path was able to be
+///   canonicalized. This indicates the path is valid and said file exists on disk
+/// - Returning `UriConversion::Unchecked` indicates that the path couldn't be
+///   canonicalized
+///
+/// # Panics
+///
+/// Will panic if `uri` cannot be interpreted as valid utf-8 after being percent-decoded
+#[must_use]
+pub fn process_uri(uri: &Uri) -> Uri {
+    let mut clean_path: String =
+        url_escape::percent_encoding::percent_decode_str(uri.path().as_str())
+            .decode_utf8()
+            .unwrap_or_else(|e| {
+                panic!(
+                    "Invalid encoding for uri \"{}\" -- {e}",
+                    uri.path().as_str()
+                )
+            })
+            .to_string();
 
-pub fn process_uri(uri: &Uri) -> UriConversion {
-    let clean_path: String = url_escape::percent_encoding::percent_decode_str(uri.path().as_str())
-        .decode_utf8()
-        .unwrap_or_else(|e| {
-            panic!(
-                "Invalid encoding for uri \"{}\" -- {e}",
-                uri.path().as_str()
-            )
-        })
-        .to_string();
+    // HACK: On Windows, sometimes a leading '/',  e.g. /C:/Users/foo/bar/...
+    // is passed as part of the path -- Stuff like Git bash and MSYS2 will accept
+    // /C/Users/foo/bar/..., but *not* if the colon is present. Vanila windows
+    // will not accept a leading slash at all, but requires the colon after the
+    // drive letter C:/Users/foo/... So we do our best to clean up here
+    if cfg!(windows) && clean_path.contains(':') {
+        clean_path = clean_path.strip_prefix('/').unwrap_or(&clean_path).into();
+    }
 
-    let Ok(path) = PathBuf::from_str(&clean_path);
-    info!("[Debug] In process_uri path: {}", path.display());
-    path.canonicalize()
-        .map_or(UriConversion::Unchecked(path), |canonicalized| {
-            UriConversion::Canonicalized(canonicalized)
-        })
+    let path_result = PathBuf::from_str(&clean_path);
+
+    // let Ok(path) = PathBuf::from_str(&clean_path);
+    // path.canonicalize()
+    //     .map_or(UriConversion::Unchecked(path), |canonicalized| {
+    //         UriConversion::Canonicalized(canonicalized)
+    //     })
+    match path_result {
+        Ok(path) => {
+            let canonical_path = path.canonicalize().unwrap_or(path);
+            let canonical_path_str = canonical_path.to_str().unwrap_or(&clean_path);
+
+            canonical_path_str.parse::<Uri>().unwrap_or_else(|_| uri.clone())
+        }
+        Err(_) => uri.clone(),
+    }
 }
-
 
 /// Handles `Request`s from the lsp client
 ///
@@ -174,6 +205,11 @@ pub fn handle_request(
             let (_id, params) = cast_req::<DocumentDiagnosticRequest>(req)
                 .expect("Failed to cast completion request");
             let project_config = config.get_config(&params.text_document.uri);
+
+            let proper_uri = process_uri(&params.text_document.uri);
+
+            info!("[Debug - handle_request.DocumentDiagnosticRequest] Processed Url: {}", proper_uri.path().as_str());
+
             // Ok to unwrap, this should never be `None`
             if project_config.opts.as_ref().unwrap().diagnostics.unwrap() {
                 let compile_cmds = get_compile_cmd_for_req(

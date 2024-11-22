@@ -62,7 +62,7 @@ created for different sub-directories or files within your project as `project`s
 Source files not contained within any `project` configs will use the default configuration
 if provided.
 
-#### Config Builder
+#### Config Builder (MASTER BRANCH ONLY)
 
 Creating a `.asm-lsp.toml` file manually is fine, but can be error-prone as projects
 grow in complexity. Running `asm-lsp gen-config` will walk you through the creation
@@ -91,10 +91,14 @@ message and exit.
 
 ```toml
 [default_config]
+# Configure documentation available for features like hover and completions
 assembler = "go"
 instruction_set = "x86/x86-64"
 
 [opts]
+# The `compiler` field is the name of a compiler/assembler on your path
+# (or the absolute path to the file) that is used to build your source files
+# This program will be used to generate diagnostics
 compiler = "zig" # need "cc" as the first argument in `compile_flags.txt`
 diagnostics = true
 default_diagnostics = true
