@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-
+use std::str::FromStr;
 use anyhow::{anyhow, Result};
 use compile_commands::{CompilationDatabase, SourceFile};
 use log::{info, warn};
@@ -25,6 +25,32 @@ use crate::{
     get_word_from_pos_params, send_empty_resp, text_doc_change_to_ts_edit, CompletionItems, Config,
     ConfigOptions, DocumentStore, NameToInstructionMap, RootConfig, ServerStore, TreeEntry,
 };
+
+pub enum UriConversion {
+    Canonicalized(PathBuf),
+    Unchecked(PathBuf),
+}
+
+
+pub fn process_uri(uri: &Uri) -> UriConversion {
+    let clean_path: String = url_escape::percent_encoding::percent_decode_str(uri.path().as_str())
+        .decode_utf8()
+        .unwrap_or_else(|e| {
+            panic!(
+                "Invalid encoding for uri \"{}\" -- {e}",
+                uri.path().as_str()
+            )
+        })
+        .to_string();
+
+    let Ok(path) = PathBuf::from_str(&clean_path);
+    info!("[Debug] In process_uri path: {}", path.display());
+    path.canonicalize()
+        .map_or(UriConversion::Unchecked(path), |canonicalized| {
+            UriConversion::Canonicalized(canonicalized)
+        })
+}
+
 
 /// Handles `Request`s from the lsp client
 ///

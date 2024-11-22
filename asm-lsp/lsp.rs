@@ -533,11 +533,24 @@ pub fn get_compile_cmd_for_req(
 /// uninitialized to avoid unnecessary allocations. If you're using this function
 /// in a new place, please reconsider this assumption
 pub fn get_default_compile_cmd(uri: &Uri, cfg: &Config) -> CompileCommand {
+    let request_path = match process_uri(uri) {
+        UriConversion::Canonicalized(p) => p,
+        UriConversion::Unchecked(p) => p,
+    };
+    let mut temp_path = request_path.to_str().unwrap_or_default().to_string();
+    if temp_path.starts_with("/") && temp_path.chars().nth(2) == Some(':') {
+        if let Some(drive_letter) = temp_path.chars().nth(1) {
+            temp_path = format!("{}:{}", drive_letter, &temp_path[3..]);
+        }
+    }
+    temp_path = temp_path.replace("/", "\\");
+    let another_temp_path = temp_path.clone();
+
     cfg.get_compiler().as_ref().map_or_else(
         || CompileCommand {
             file: SourceFile::All, // Field isn't checked when called, intentionally left in odd state here
             directory: PathBuf::new(), // Field isn't checked when called, intentionally left uninitialized here
-            arguments: Some(CompileArgs::Flags(vec![uri.path().to_string()])),
+            arguments: Some(CompileArgs::Flags(vec![temp_path])),
             command: None,
             output: None,
         },
@@ -546,7 +559,7 @@ pub fn get_default_compile_cmd(uri: &Uri, cfg: &Config) -> CompileCommand {
             directory: PathBuf::new(), // Field isn't checked when called, intentionally left uninitialized here
             arguments: Some(CompileArgs::Arguments(vec![
                 (*compiler).to_string(),
-                uri.path().to_string(),
+                another_temp_path,
             ])),
             command: None,
             output: None,
