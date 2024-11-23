@@ -1,8 +1,8 @@
 use std::path::PathBuf;
-
+use std::str::FromStr;
 use anyhow::{anyhow, Result};
 use compile_commands::{CompilationDatabase, SourceFile};
-use log::{info, warn};
+use log::{info, warn, error};
 use lsp_server::{Connection, Message, Notification, Request, RequestId, Response};
 use lsp_types::{
     notification::{
@@ -25,6 +25,86 @@ use crate::{
     get_word_from_pos_params, send_empty_resp, text_doc_change_to_ts_edit, CompletionItems, Config,
     ConfigOptions, DocumentStore, NameToInstructionMap, RootConfig, ServerStore, TreeEntry,
 };
+
+
+pub enum UriConversion {
+    Canonicalized(PathBuf),
+    Unchecked(PathBuf),
+}
+
+/// Sanitizes the URI path sent by an LSP client
+///
+/// - "%3A" is replaced by ':' on windows, as this is likely escaped
+///   by the emacs client on windows/mingw/msys2
+/// - Returning `UriConversion::Canonicalized` indicates a path was able to be
+///   canonicalized. This indicates the path is valid and said file exists on disk
+/// - Returning `UriConversion::Unchecked` indicates that the path couldn't be
+///   canonicalized
+///
+/// # Panics
+///
+/// Will panic if `uri` cannot be interpreted as valid utf-8 after being percent-decoded
+#[must_use]
+pub fn process_uri(uri: &Uri) -> UriConversion {
+    let clean_path: String = url_escape::percent_encoding::percent_decode_str(uri.path().as_str())
+        .decode_utf8()
+        .unwrap_or_else(|e| {
+            panic!(
+                "Invalid encoding for uri \"{}\" -- {e}",
+                uri.path().as_str()
+            )
+        })
+        .to_string();
+
+    let Ok(path) = PathBuf::from_str(&clean_path);
+    path.canonicalize()
+        .map_or(UriConversion::Unchecked(path), |canonicalized| {
+            UriConversion::Canonicalized(canonicalized)
+        })
+}
+
+
+pub fn uri_to_str(uri: &Uri) -> String {
+    let request_path = match process_uri(uri) {
+        UriConversion::Canonicalized(p) => p,
+        UriConversion::Unchecked(p) => {
+            error!(
+                "Failed to canonicalized request path {}, using {}",
+                uri.path().as_str(),
+                p.display()
+            );
+            p
+        }
+    };
+
+    let req_path = request_path.to_str().unwrap_or_default().to_string();
+
+    let mut arg_path = format!("{}", req_path);
+
+    if cfg!(windows) && req_path.contains(":") && req_path.starts_with('/') {
+        arg_path = format!("{}", &req_path[1..]);
+    }
+
+    return arg_path;
+
+}
+
+pub fn uri_to_buf(uri: &Uri) -> PathBuf {
+    let request_path = match process_uri(uri) {
+        UriConversion::Canonicalized(p) => p,
+        UriConversion::Unchecked(p) => {
+            error!(
+                "Failed to canonicalized request path {}, using {}",
+                uri.path().as_str(),
+                p.display()
+            );
+            p
+        }
+    };
+
+    return request_path;
+}
+
 
 /// Handles `Request`s from the lsp client
 ///
@@ -304,8 +384,10 @@ pub fn handle_hover_request(
         .text_store
         .get_document(&params.text_document_position_params.text_document.uri)
     {
+        info!("Trying to service hover request");
         get_word_from_pos_params(doc, &params.text_document_position_params)
     } else {
+        info!("Sending empty response for hover request.");
         return send_empty_resp(connection, id, config);
     };
 
@@ -533,7 +615,11 @@ pub fn handle_diagnostics(
     cfg: &Config,
     compile_cmds: &CompilationDatabase,
 ) -> Result<()> {
-    let req_source_path = PathBuf::from(uri.path().as_str());
+
+    let source_path = uri_to_str(uri);
+    let req_source_path = match PathBuf::from_str(&source_path) {
+        Ok(p) => p,
+    };
 
     let source_entries = compile_cmds.iter().filter(|entry| match entry.file {
         SourceFile::File(ref file) => {

@@ -3,6 +3,7 @@ use std::borrow::ToOwned;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::convert::TryFrom;
+use std::fmt::format;
 use std::fs::{create_dir_all, File};
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
@@ -170,6 +171,46 @@ pub fn process_uri(uri: &Uri) -> UriConversion {
         })
 }
 
+pub fn uri_to_str(uri: &Uri) -> String {
+    let request_path = match process_uri(uri) {
+        UriConversion::Canonicalized(p) => p,
+        UriConversion::Unchecked(p) => {
+            error!(
+                "Failed to canonicalized request path {}, using {}",
+                uri.path().as_str(),
+                p.display()
+            );
+            p
+        }
+    };
+
+    let req_path = request_path.to_str().unwrap_or_default().to_string();
+
+    let mut arg_path = format!("{}", req_path);
+
+    if cfg!(windows) && req_path.contains(":") && req_path.starts_with('/') {
+        arg_path = format!("{}", &req_path[1..]);
+    }
+
+    return arg_path;
+
+}
+
+pub fn uri_to_buf(uri: &Uri) -> PathBuf {
+    let request_path = match process_uri(uri) {
+        UriConversion::Canonicalized(p) => p,
+        UriConversion::Unchecked(p) => {
+            error!(
+                "Failed to canonicalized request path {}, using {}",
+                uri.path().as_str(),
+                p.display()
+            );
+            p
+        }
+    };
+
+    return request_path;
+}
 /// Returns the word undernearth the cursor given the specified `TextDocumentPositionParams`
 ///
 /// # Errors
@@ -455,24 +496,17 @@ pub fn get_compile_cmd_for_req(
     req_uri: &Uri,
     compile_cmds: &CompilationDatabase,
 ) -> CompilationDatabase {
-    let request_path = match process_uri(req_uri) {
-        UriConversion::Canonicalized(p) => p,
-        UriConversion::Unchecked(p) => {
-            error!(
-                "Failed to canonicalized request path {}, using {}",
-                req_uri.path().as_str(),
-                p.display()
-            );
-            p
-        }
-    };
+
+    let arg_path = uri_to_str(req_uri);
+    let request_path = uri_to_buf(req_uri);
+
     let config = config.get_config(req_uri);
     match (config.get_compiler(), config.get_compile_flags_txt()) {
         (Some(compiler), Some(flags)) => {
             // Fill out the full command invocation
             let mut args = vec![compiler.to_owned()];
             args.append(&mut flags.clone());
-            args.push(request_path.to_str().unwrap_or_default().to_string());
+            args.push(arg_path);
             vec![CompileCommand {
                 file: SourceFile::File(request_path),
                 directory: PathBuf::new(),
@@ -497,7 +531,7 @@ pub fn get_compile_cmd_for_req(
                     args.append(&mut flags.clone());
                 }
             }
-            args.push(request_path.to_str().unwrap_or_default().to_string());
+            args.push(arg_path);
             vec![CompileCommand {
                 file: SourceFile::File(request_path),
                 directory: PathBuf::new(),
@@ -533,11 +567,12 @@ pub fn get_compile_cmd_for_req(
 /// uninitialized to avoid unnecessary allocations. If you're using this function
 /// in a new place, please reconsider this assumption
 pub fn get_default_compile_cmd(uri: &Uri, cfg: &Config) -> CompileCommand {
+
     cfg.get_compiler().as_ref().map_or_else(
         || CompileCommand {
             file: SourceFile::All, // Field isn't checked when called, intentionally left in odd state here
             directory: PathBuf::new(), // Field isn't checked when called, intentionally left uninitialized here
-            arguments: Some(CompileArgs::Flags(vec![uri.path().to_string()])),
+            arguments: Some(CompileArgs::Flags(vec![uri_to_str(uri)])),
             command: None,
             output: None,
         },
@@ -546,7 +581,7 @@ pub fn get_default_compile_cmd(uri: &Uri, cfg: &Config) -> CompileCommand {
             directory: PathBuf::new(), // Field isn't checked when called, intentionally left uninitialized here
             arguments: Some(CompileArgs::Arguments(vec![
                 (*compiler).to_string(),
-                uri.path().to_string(),
+                uri_to_str(uri),
             ])),
             command: None,
             output: None,
@@ -565,6 +600,8 @@ pub fn apply_compile_cmd(
 ) {
     // TODO: Consolidate this logic, a little tricky because we need to capture
     // compile_cmd.arguments by reference, but we get an owned Vec out of args_from_cmd()...
+    //
+
     if let Some(ref args) = compile_cmd.arguments {
         match args {
             CompileArgs::Flags(flags) => {
@@ -576,11 +613,12 @@ pub fn apply_compile_cmd(
                 for compiler in compilers {
                     match Command::new(compiler) // default or user-supplied compiler
                         .args(flags) // user supplied args
-                        .arg(uri.path().as_str()) // the source file in question
+                        .arg(uri_to_str(uri)) // the source file in question
                         .output()
                     {
                         Ok(result) => {
                             let output_str = ustr::get_string(result.stderr);
+                            info!("[Debug] diag out FLAGS: {}", output_str);
                             get_diagnostics(diagnostics, &output_str);
                         }
                         Err(e) => {
@@ -601,6 +639,7 @@ pub fn apply_compile_cmd(
                     }
                 };
                 let output_str = ustr::get_string(output.stderr);
+                info!("[Debug] diag out ARGS: {}", output_str);
                 get_diagnostics(diagnostics, &output_str);
             }
         }
