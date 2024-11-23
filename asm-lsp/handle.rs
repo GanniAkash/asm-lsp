@@ -15,8 +15,8 @@ use lsp_types::{
     DidOpenTextDocumentParams, DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionParams,
     HoverParams, PublishDiagnosticsParams, ReferenceParams, SignatureHelpParams, Uri,
 };
-use std::path::PathBuf;
 use std::str::FromStr;
+use std::{fmt::format, path::PathBuf};
 use tree_sitter::Parser;
 
 use crate::{
@@ -45,6 +45,7 @@ pub enum UriConversion {
 /// Will panic if `uri` cannot be interpreted as valid utf-8 after being percent-decoded
 #[must_use]
 pub fn process_uri(uri: &Uri) -> Uri {
+    info!("[Debug] In process_uri");
     let mut clean_path: String =
         url_escape::percent_encoding::percent_decode_str(uri.path().as_str())
             .decode_utf8()
@@ -61,6 +62,7 @@ pub fn process_uri(uri: &Uri) -> Uri {
     // /C/Users/foo/bar/..., but *not* if the colon is present. Vanila windows
     // will not accept a leading slash at all, but requires the colon after the
     // drive letter C:/Users/foo/... So we do our best to clean up here
+
     if cfg!(windows) && clean_path.contains(':') {
         clean_path = clean_path.strip_prefix('/').unwrap_or(&clean_path).into();
     }
@@ -72,14 +74,36 @@ pub fn process_uri(uri: &Uri) -> Uri {
     //     .map_or(UriConversion::Unchecked(path), |canonicalized| {
     //         UriConversion::Canonicalized(canonicalized)
     //     })
+
+    info!("[Debug - process_uri] path_result: {}", clean_path);
     match path_result {
         Ok(path) => {
             let canonical_path = path.canonicalize().unwrap_or(path);
-            let canonical_path_str = canonical_path.to_str().unwrap_or(&clean_path);
 
-            canonical_path_str.parse::<Uri>().unwrap_or_else(|_| uri.clone())
+            let canonical_path_str = canonical_path.to_str().unwrap_or(&clean_path);
+            info!(
+                "[Debug - process_uri] canonical_path_str: {}",
+                canonical_path_str
+            );
+            if canonical_path_str.starts_with("\\\\?") {
+                let file_path_str = format!("file:///{}", &canonical_path_str[4..]);
+                info!("[Debug - process_uri] file_path_str: {}", file_path_str);
+                let test = file_path_str.parse::<Uri>().unwrap_or_else(|_| uri.clone());
+                info!(
+                    "[Debug - process_uri] file_path_uri: {}",
+                    test.path().as_str()
+                );
+                test
+            } else {
+                canonical_path_str
+                    .parse::<Uri>()
+                    .unwrap_or_else(|_| uri.clone())
+            }
         }
-        Err(_) => uri.clone(),
+        Err(_) => {
+            info!("[Debug - process_uri] Error is the problem");
+            uri.clone()
+        }
     }
 }
 
@@ -208,13 +232,16 @@ pub fn handle_request(
 
             let proper_uri = process_uri(&params.text_document.uri);
 
-            info!("[Debug - handle_request.DocumentDiagnosticRequest] Processed Url: {}", proper_uri.path().as_str());
+            info!(
+                "[Debug - handle_request.DocumentDiagnosticRequest] Processed Url: {}",
+                proper_uri.path().as_str()
+            );
 
             // Ok to unwrap, this should never be `None`
             if project_config.opts.as_ref().unwrap().diagnostics.unwrap() {
                 let compile_cmds = get_compile_cmd_for_req(
                     config,
-                    &params.text_document.uri,
+                    &proper_uri,
                     &store.compile_commands,
                 );
                 info!(
@@ -223,7 +250,7 @@ pub fn handle_request(
                 );
                 handle_diagnostics(
                     connection,
-                    &params.text_document.uri,
+                    &proper_uri,
                     project_config,
                     &compile_cmds,
                 )?;

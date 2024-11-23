@@ -465,24 +465,17 @@ pub fn get_compile_cmd_for_req(
     req_uri: &Uri,
     compile_cmds: &CompilationDatabase,
 ) -> CompilationDatabase {
-    let request_path = match process_uri(req_uri) {
-        UriConversion::Canonicalized(p) => p,
-        UriConversion::Unchecked(p) => {
-            error!(
-                "Failed to canonicalized request path {}, using {}",
-                req_uri.path().as_str(),
-                p.display()
-            );
-            p
-        }
-    };
+
+    let Ok(request_path) = PathBuf::from_str(&req_uri.path().as_str());
+
+
     let config = config.get_config(req_uri);
     match (config.get_compiler(), config.get_compile_flags_txt()) {
         (Some(compiler), Some(flags)) => {
             // Fill out the full command invocation
             let mut args = vec![compiler.to_owned()];
             args.append(&mut flags.clone());
-            args.push(request_path.to_str().unwrap_or_default().to_string());
+            args.push(req_uri.to_string());
             vec![CompileCommand {
                 file: SourceFile::File(request_path),
                 directory: PathBuf::new(),
@@ -507,7 +500,7 @@ pub fn get_compile_cmd_for_req(
                     args.append(&mut flags.clone());
                 }
             }
-            args.push(request_path.to_str().unwrap_or_default().to_string());
+            args.push(req_uri.to_string());
             vec![CompileCommand {
                 file: SourceFile::File(request_path),
                 directory: PathBuf::new(),
